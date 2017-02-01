@@ -13,12 +13,11 @@ In the long run support is planned for the following comands:
 * F fill
 * G go
 * I input
-* L load*
+* L load (1)
 * M move
 * O output
 * S search
 * U unassemble
-* W write*
+* W write (1)
 
-* load and write will use the XModem protocol to receive and send files from a PC
-
+(1) load and write will use the XModem protocol to receive and send files from a PC
