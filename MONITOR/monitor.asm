@@ -8,68 +8,93 @@
 ;
 
 ; ASCII Characters
-BS              .EQU    08H             ; Backspace
-CR              .EQU    0DH
-LF              .EQU    0AH
-FF              .EQU    0CH             ; Clear screen
+DEFC    BS      =   08H             ; Backspace
+DEFC    CR      =   0DH
+DEFC    LF      =   0AH
+DEFC    SOH     =   01H
+DEFC    EOT     =   04H
+DEFC    ACK     =   06H
+DEFC    NAK     =   15H
 
-PROMPT          .EQU    '>'
+DEFC    PROMPT  =   '>'
 
 ; ACIA
-ACIA_STATUS     .EQU    80H
-ACIA_CONTROL    .EQU    80H
-ACIA_RX         .EQU    81H
-ACIA_TX         .EQU    81H
-RTS_HIGH        .EQU    0D6H
-RTS_LOW         .EQU    096H
+DEFC    ACIA_STATUS     =   80H
+DEFC    ACIA_CONTROL    =   80H
+DEFC    ACIA_RX         =   81H
+DEFC    ACIA_TX         =   81H
+DEFC    RTS_HIGH        =   0D6H
+DEFC    RTS_LOW         =   096H
+DEFC    RTS_LOW_DI      =   016H
 
+ifdef ROM
                 .ORG    8000H
 
 ; Serial receive buffer
-SER_BUFSIZE     .EQU    3FH         ; Size of the buffer
-SER_FULLSIZE    .EQU    30H         ; Limit for flow control
-SER_EMPTYSIZE   .EQU    5           ; Limit for flow control
+DEFC    SER_BUFSIZE     =   3FH         ; Size of the buffer
+DEFC    SER_FULLSIZE    =   30H         ; Limit for flow control
+DEFC    SER_EMPTYSIZE   =   5           ; Limit for flow control
 
-serBuf          .DEFS   SER_BUFSIZE
-serInPtr        .DEFS   2
-serRdPtr        .DEFS   2
-serBufUsed      .DEFS   1
+serBuf:         DEFS    SER_BUFSIZE
+serInPtr:       DEFS    2
+serRdPtr:       DEFS    2
+serBufUsed:     DEFS    1
+
+else
+                ORG     8080H
+                
+                JP      INIT_HELLO
+endif
 
 ; Buffer for command
-CMD_MAXSIZE     .EQU    32
-cmdBuf          .DEFS   CMD_MAXSIZE+1
-cmdSize         .DEFS   1
+DEFC    CMD_MAXSIZE     =   32
+cmdBuf:         DEFS   CMD_MAXSIZE+1
+cmdSize:        DEFS   1
 
-                .ORG $0000
+; Buffer used for Display output and Xmodem
+auxbuf:         DEFS    132
+
+; Comand parameters
+orig:           DEFS   2
+dest:           DEFS   2
+len:            DEFS   2
+
+; Xmodem
+DEFC    MAX_RETRIES  =  5
+blockno:         DEFS   1
+
+ifdef ROM
+
+                ORG $0000
 ;------------------------------------------------------------------------------
 ; Reset
 
-RST00           DI                      ;Disable interrupts
+RST00:          DI                      ;Disable interrupts
                 JP      INIT            ;Initialize Hardware and go
 
 ;------------------------------------------------------------------------------
 ; Transmit a character
 
-                .ORG    0008H
-RST08            JP     TXA
+                ORG    0008H
+RST08:          JP     TXA
 
 ;------------------------------------------------------------------------------
 ; Receive a character (waits for reception)
 
-                .ORG    0010H
-RST10            JP     RXA
+                ORG    0010H
+RST10:          JP     RXA
 
 ;------------------------------------------------------------------------------
 ; Check serial status
 
-                .ORG    0018H
-RST18            JP     CKINCHAR
+                ORG    0018H
+RST18:          JP     CKINCHAR
 
 ;------------------------------------------------------------------------------
 ; RST 38 - INTERRUPT VECTOR [ for IM 1 ]
 
-                .ORG     0038H
-RST38            JR      serialInt       
+                ORG     0038H
+RST38:          JR      serialInt       
 
 ;------------------------------------------------------------------------------
 ; Serial interrupt - put received char in the buffer
@@ -158,6 +183,8 @@ CKINCHAR        LD       A,(serBufUsed)
                 CP       $0
                 RET
 
+endif
+
 ;------------------------------------------------------------------------------
 ; Print a zero-ended message
 ; Input <HL> address of the message
@@ -198,7 +225,12 @@ READ_CMD_1:
                 DEC     C
                 JR      READ_CMD_1
 READ_CMD_2:
-                AND     A,0BFH          ; convert to uppercase
+                CP      20H
+                JR      C,READ_CMD_1
+                CP      60H
+                JR      C,READ_CMD_3
+                AND     A,0DFH          ; convert to uppercase
+READ_CMD_3:
                 LD      (HL),A          ; save char
                 LD      A,C
                 CP      CMD_MAXSIZE                JR      Z,READ_CMD_1    ; ignore if buffer full
@@ -209,8 +241,8 @@ READ_CMD_2:
                 JR      READ_CMD_1
 READ_CMD_END:
                 LD      (HL),0          ; end string
-                LD      A, C
-                LD      (cmdSize),C     ; save size
+                LD      A,C
+                LD      (cmdSize),A     ; save size
                 LD      A,CR
                 RST     08H             
                 LD      A,LF
@@ -218,7 +250,86 @@ READ_CMD_END:
                 RET
 
 ;------------------------------------------------------------------------------
+; Skip blanks and get 16 bit hex value from command buffer
+; Input:   HL - pointer to next char
+;          DE - default value
+; Returns: HL - updated pointer to next char
+;          DE - value
+;          CY = 1 if error
+;          CY = 0 and Z = 1 if no value
+;          CY = 0 and Z = 0 if success
+;          
+; Affects: Flags, A, BC, DE, HL
+GET16:
+                LD  A,(HL)
+                OR  A
+                RET Z           ; return at end
+                CP  20H
+                JR  NZ,GET16_1
+                INC HL          ; skip leading blanks
+                JR  GET16
+GET16_1:
+                LD  DE,0        ; found something
+GET16_2:
+                SUB '0'
+                RET C           ; return if less then '0'
+                CP  10
+                JR  C,GET16_3   ; ok if '0' to '9'
+                SUB 7
+                RET C           ; return if > '9' and < 'A'
+GET16_3:
+                CP  16
+                CCF
+                RET C
+                EX  DE,HL
+                ADD HL,HL
+                ADD HL,HL
+                ADD HL,HL
+                ADD HL,HL
+                LD  B,0
+                LD  C,A
+                ADD HL,BC
+                EX  DE,HL       ; DE = (DE << 4) + digit
+                INC HL
+                LD  A,(HL)
+                OR  A
+                JR  Z,GET16_4   ; stop if at end of line
+                CP  20H
+                JR  NZ,GET16_2  ; repeat if found a non blank
+GET16_4:
+                OR  A,0FFH      ; set Z=0 and CY=0
+                RET             ; normal exit
+
+; Put hex representation of a byte in a buffer
+; Input:    B  value
+;           IX pointer to buffer
+; Returns:  IX next pos in buffer
+; Affects:  Flags, A, IX
+PUT8:
+                LD      A,B
+                SRL     A
+                SRL     A
+                SRL     A
+                SRL     A
+                CALL    PUT4
+                LD      (IX+0),A
+                INC     IX
+                LD      A,B
+                CALL    PUT4
+                LD      (IX+0),A
+                INC     IX
+                RET
+PUT4:
+                AND     A,0Fh
+                ADD     A,30H
+                CP      03Ah
+                RET     C
+                ADD     A,7
+                RET
+
+;------------------------------------------------------------------------------
 ; Initialization
+ifdef ROM
 INIT:
                 ; init stack
                 LD        HL,0               ; Stack at end of Ram
@@ -234,6 +345,8 @@ INIT:
                 OUT       (ACIA_CONTROL),A   ; Initialise ACIA
                 IM        1                  ; Interrupt Mode 1
                 EI
+endif
+INIT_HELLO:
                 ; say hello to the world
                 LD        HL,HELLO        ; Sign-on message
                 CALL      PRINT           ; Output string
@@ -249,25 +362,26 @@ MAIN:
 ;------------------------------------------------------------------------------
 ; Execute the comand
 EXEC_CMD:
-                LD      IX,0
+                LD      IX,CMD_TABLE
                 LD      A,(cmdBuf)
                 OR      A
                 LD      B,A
                 RET     Z
 EXEC_CMD_1:
-                LD      A,(CMD_TABLE+IX)
+                LD      A,(IX)
                 OR      A
                 JR      Z,EXEC_CMD_3
-                CMP     B
+                CP      B
                 JR      Z,EXEC_CMD_2
+                INC     IX
                 INC     IX
                 INC     IX
                 JR      EXEC_CMD_1
 EXEC_CMD_2:
                 INC     IX
-                LD      L,(CMD_TABLE+IX)
+                LD      L,(IX)
                 INC     IX
-                LD      H,(CMD_TABLE+IX)
+                LD      H,(IX)
                 JP      (HL)
 EXEC_CMD_3:
                 LD        HL,ERR_CMD
@@ -277,38 +391,309 @@ EXEC_CMD_3:
 ;------------------------------------------------------------------------------
 ; Command decode table
 CMD_TABLE:
-                .BYTE   'A'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'C'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'D'
-                .WORD   CMD_DISPLAY
-                .BYTE   'E'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'F'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'G'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'I'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'L'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'M'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'O'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'S'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'U'
-                .WORD   CMD_NOT_IMP
-                .BYTE   'W'
-                .WORD   CMD_NOT_IMP
-                .BYTE   0
+                DEFB   'A'
+                DEFW   CMD_NOT_IMP
+                DEFB   'C'
+                DEFW   CMD_NOT_IMP
+                DEFB   'D'
+                DEFW   CMD_DISPLAY
+                DEFB   'E'
+                DEFW   CMD_NOT_IMP
+                DEFB   'F'
+                DEFW   CMD_NOT_IMP
+                DEFB   'G'
+                DEFW   CMD_NOT_IMP
+                DEFB   'I'
+                DEFW   CMD_NOT_IMP
+                DEFB   'L'
+                DEFW   CMD_NOT_IMP
+                DEFB   'M'
+                DEFW   CMD_NOT_IMP
+                DEFB   'O'
+                DEFW   CMD_NOT_IMP
+                DEFB   'S'
+                DEFW   CMD_NOT_IMP
+                DEFB   'U'
+                DEFW   CMD_NOT_IMP
+                DEFB   'W'
+                DEFW   CMD_WRITE
+                DEFB   0
 
 ;------------------------------------------------------------------------------
 ; Display command
+; D [addr [len]]
+; if addr and len are ommited, displays the next 128 bytes
+; if len is ommited, 128 is assumed
 CMD_DISPLAY:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,(orig)
+                CALL    GET16
+                JP      C,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,128
+                CALL    GET16
+                JP      C,PARAM_ERR
+                LD      (len),DE
+CMD_DISP_1:
+                ; prepare output line
+                ; xxxx: xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xxxxxxxxxxxxxxxx
+                LD      HL,auxbuf+4
+                LD      (HL),':'
+                INC     HL
+                LD      C,65
+                LD      A,20H
+CMD_DISP_2:
+                LD      (HL),A
+                INC     HL
+                DEC     C
+                JR      NZ,CMD_DISP_2
+                
+                LD      (HL),CR
+                INC     HL
+                LD      (HL),LF
+                INC     HL
+                LD      (HL),0
+
+                LD      HL,(orig)
+                LD      IX,auxbuf
+                LD      B,H
+                CALL    PUT8
+                LD      A,L
+                AND     A,0F0H
+                LD      B,A
+                CALL    PUT8
+                INC     IX
+                INC     IX
+                LD      IY,auxbuf+54
+                
+                ; Position at first byte
+                LD      A,L
+                AND     A,0Fh
+                LD      C,A
+                LD      B,0
+                ADD     IY,BC
+                ADD     IX,BC
+                ADD     IX,BC
+                ADD     IX,BC
+                LD      A,16
+                SUB     A,C
+                LD      C,A
+CMD_DISP_3:
+                LD      B,(HL)
+                CALL    PUT8
+                INC     IX
+                LD      B,'.'
+                LD      A,(HL)
+                INC     HL
+                CP      20H
+                JR      C,CMD_DISP_4
+                CP      7EH
+                JR      NC,CMD_DISP_4
+                LD      B,A
+CMD_DISP_4:
+                LD      (IY+0),B
+                INC     IY
+                LD      DE,(len)
+                DEC     DE
+                LD      (len),DE
+                LD      A,D
+                OR      A,E
+                JR      Z,CMD_DISP_5
+                DEC     C
+                JR      NZ,CMD_DISP_3
+                LD      (orig),HL
+                LD      HL,auxbuf
+                CALL    PRINT
+                JR      CMD_DISP_1
+CMD_DISP_5:
+                LD      (orig),HL
+                LD      HL,auxbuf
+                CALL    PRINT
+
                 RET
+
+;------------------------------------------------------------------------------
+; Write command
+; W addr len
+; len will be rounded up to the next multiple of 128
+CMD_WRITE:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      Z,PARAM_ERR
+                JP      C,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,0
+                CALL    GET16
+                JP      Z,PARAM_ERR
+                JP      C,PARAM_ERR
+                LD      HL,7FH
+                ADD     HL,DE
+                LD      A,L
+                AND     80H
+                LD      L,A
+                OR      H
+                JP      Z,PARAM_ERR
+                LD      (len),HL
+                
+                ; Will use our own receive routine, no interrupts
+                LD        A,RTS_LOW_DI
+                OUT       (ACIA_CONTROL),A
+                
+                ; Xmodem transmission
+                XOR      A
+                LD      (blockno),A
+                CALL    XM_START_TX
+                JR      Z,CMD_WRITE_ERR
+CMD_WRITE_1:
+                LD      A,(blockno)
+                INC     A
+                LD      (blockno),A
+                CALL    XM_SEND_BLK
+                JR      Z,CMD_WRITE_ERR
+                LD      HL,(orig)
+                LD      DE,128
+                ADD     HL,DE
+                LD      (orig),HL
+                LD      HL,(len)
+                LD      DE,0FF80H   ; -128
+                ADD     HL,DE
+                LD      (len),HL
+                LD      A,H
+                OR      L
+                JR      NZ,CMD_WRITE_1
+                
+                CALL    XM_END_TX
+                JR      Z,CMD_WRITE_ERR
+                LD      HL,XM_SEND_OK
+                CALL    PRINT
+                JR      CMD_WRITE_END
+CMD_WRITE_ERR:
+                LD      HL,XM_SEND_ERR
+                CALL    PRINT
+CMD_WRITE_END:
+                ; Turn on ACIA Rx interrupt
+                LD        A,RTS_LOW
+                OUT       (ACIA_CONTROL),A
+                RET
+
+; Wait for the starting NAK
+; Returns Z = 1 if timeout
+; Affects:  Flags, A, BC, HL
+XM_START_TX:
+                LD      L,90    ; total timeout aprox 30 seg
+XM_START_TX_1:
+                CALL    XM_GETCH
+                JR      Z,XM_START_TX_2
+                CP      NAK
+                JR      Z,XM_START_TX_3
+XM_START_TX_2:
+                DEC     L
+                JR      NZ,XM_START_TX_1
+                RET
+XM_START_TX_3:     
+                OR      1       ; clear Z
+                RET
+                
+; Send the current block
+; Returns Z = 1 if timeout or max retreis
+; Affects:  Flags, A, BC, DE, HL
+XM_SEND_BLK:
+                ; mount packet
+                LD      HL,auxbuf
+                LD      (HL),SOH
+                INC     HL
+                LD      A,(blockno)
+                LD      (HL),A
+                INC     HL
+                CPL
+                LD      (HL),A
+                INC     HL
+                LD      DE,(orig)
+                LD      BC,128
+XM_SEND_BLK_1:
+                LD      A,(DE)
+                INC     DE
+                LD      (HL),A
+                INC     HL
+                ADD     A,B
+                LD      B,A
+                DEC     C
+                JR      NZ,XM_SEND_BLK_1
+                LD      (HL),B
+                ; Send
+                LD      E,MAX_RETRIES
+XM_SEND_BLK_2:
+                LD      HL,auxbuf
+                LD      C,132
+XM_SEND_BLK_3:
+                IN      A,(ACIA_STATUS)
+                AND     2
+                JR      Z,XM_SEND_BLK_3   ; wait transmitter free
+                LD      A,(HL)
+                OUT     (ACIA_TX),A
+                INC     HL
+                DEC     C
+                JR      NZ,XM_SEND_BLK_3
+                ; Wait for ACK
+XM_SEND_BLK_4:
+                CALL    XM_GETCH
+                JR      Z,XM_SEND_BLK_5
+                CP      ACK
+                JR      Z,XM_SEND_BLK_6
+XM_SEND_BLK_5:
+                DEC     E
+                JR      NZ,XM_SEND_BLK_2
+                RET
+XM_SEND_BLK_6:
+                OR      1       ; clear Z
+                RET
+
+; Send end of transmission
+; Returns Z = 1 if timeout or max retreis
+; Affects:  Flags, A, BC, HL
+XM_END_TX:
+                LD      L,MAX_RETRIES
+XM_END_TX_1:
+                IN      A,(ACIA_STATUS)
+                AND     2
+                JR      Z,XM_END_TX_1   ; wait transmitter free
+                LD      A,EOT
+                OUT     (ACIA_TX),A
+                
+                CALL    XM_GETCH
+                JR      Z,XM_END_TX_2
+                CP      ACK
+                JR      Z,XM_END_TX_3
+XM_END_TX_2:
+                DEC     L
+                JR      NZ,XM_END_TX_1
+                RET
+XM_END_TX_3:
+                OR      1       ; clear Z
+                RET
+
+; Receive a char
+; timout = 65536 x (10+7+7+6+4+4+12) / 7372.8 = aprox 0,355 sec
+; Returns:  A received char (if any)
+;           Z = 1 if timeout
+; Affects:  Flags, A, BC
+XM_GETCH:
+            LD      BC,0
+XM_GETCH_1:
+            IN      A,(ACIA_STATUS)
+            AND     $01
+            JR      NZ,XM_GETCH_2
+            DEC     BC
+            LD      A,B
+            OR      C
+            JR      NZ,XM_GETCH_1
+            RET
+XM_GETCH_2:
+            IN       A,(ACIA_RX)    ; Get char from ACIA
+            RET
 
 ;------------------------------------------------------------------------------
 ; Command not implemmented
@@ -318,16 +703,36 @@ CMD_NOT_IMP:
                 RET
 
 ;------------------------------------------------------------------------------
-; Messages
-HELLO:      .BYTE     FF
-            .BYTE     "Z80 Monitor by Daniel Quadros",CR,LF
-            .BYTE     "Serial routines by Grant Searle",CR,LF
-            .BYTE     0
-            
-NOT_IMP:
-            .BYTE     "Not implemented",CR,LF
-            .BYTE     0
+; Invalid parameter
+PARAM_ERR:
+                LD        HL,PARAM_INV
+                CALL      PRINT
+                RET
 
+;------------------------------------------------------------------------------
+; Messages
+HELLO:      
+            DEFB    CR,LF
+            DEFB    "Z80 Monitor by Daniel Quadros",CR,LF
+            DEFB    "Serial routines by Grant Searle",CR,LF
+            DEFB    0
+            
 ERR_CMD:
-            .BYTE     "Unknown command",CR,LF
-            .BYTE     0
+            DEFB    "Unknown command",CR,LF
+            DEFB    0
+
+NOT_IMP:
+            DEFB    "Not implemented",CR,LF
+            DEFB    0
+
+PARAM_INV:
+            DEFB    "Invalid parameter",CR,LF
+            DEFB    0
+
+XM_SEND_OK:
+            DEFB    "Transmission successful",CR,LF
+            DEFB    0
+
+XM_SEND_ERR:
+            DEFB    "Error in transmission",CR,LF
+            DEFB    0
