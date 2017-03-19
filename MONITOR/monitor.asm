@@ -250,6 +250,49 @@ READ_CMD_END:
                 RET
 
 ;------------------------------------------------------------------------------
+; Reads an 8 bit value
+; Input:   B - default value
+; Return:  B - value
+;          Z = 1 if ENTER was pressed
+; Affects: Flags, A, B
+GET8:
+                RST     10H         ; read char
+                CP      CR
+                RET     Z           ; Enter ends
+                CP      ' '
+                JR      NZ,GET8_1
+                OR      A,0FFH      ; set Z=0
+                RET                 ; normal exit
+GET8_1:
+                CP      'a'
+                JR      C,GET8_2
+                SUB     20H         ; change to uppercase
+GET8_2:
+                LD      C,A
+                SUB     '0'
+                JR      C,GET8      ; ignore if ilegal
+                CP      10
+                JR      C,GET8_3
+                SUB     7
+                JR      C,GET8      ; ignore if ilegal
+                CP      16
+                JR      NC,GET8     ; ignore if ilegal
+GET8_3:
+                PUSH    AF
+                LD      A,C
+                RST     08H         ; echo
+                LD      A,B
+                ADD     A,A
+                ADD     A,A
+                ADD     A,A
+                ADD     A,A
+                LD      B,A
+                POP     AF
+                ADD     A,B
+                LD      B,A
+                JR      GET8
+
+;------------------------------------------------------------------------------
 ; Skip blanks and get 16 bit hex value from command buffer
 ; Input:   HL - pointer to next char
 ;          DE - default value
@@ -394,23 +437,23 @@ CMD_TABLE:
                 DEFB   'A'
                 DEFW   CMD_NOT_IMP
                 DEFB   'C'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_COMPARE
                 DEFB   'D'
                 DEFW   CMD_DISPLAY
                 DEFB   'E'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_ENTER
                 DEFB   'F'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_FILL
                 DEFB   'G'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_GOTO
                 DEFB   'I'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_INPUT
                 DEFB   'L'
                 DEFW   CMD_NOT_IMP
                 DEFB   'M'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_MOVE
                 DEFB   'O'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_OUTPUT
                 DEFB   'S'
                 DEFW   CMD_NOT_IMP
                 DEFB   'U'
@@ -418,6 +461,79 @@ CMD_TABLE:
                 DEFB   'W'
                 DEFW   CMD_WRITE
                 DEFB   0
+
+;------------------------------------------------------------------------------
+; Compare command
+; C addr1 len addr2
+CMD_COMPARE:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (len),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                ; compare
+                LD      HL,(orig)
+                LD      BC,(len)
+CMD_COMPARE_1:
+                LD      A,(DE)
+                CP      (HL)
+                JR      Z,CMD_COMPARE_2
+                
+                ; show difference
+                PUSH    BC
+                LD      IX,auxbuf
+                LD      B,H
+                CALL    PUT8
+                LD      B,L
+                CALL    PUT8
+                LD      (IX+0),':'
+                INC     IX
+                LD      B,(HL)
+                CALL    PUT8
+                LD      (IX+0),' '
+                INC     IX
+                
+                EX      DE,HL
+                LD      B,H
+                CALL    PUT8
+                LD      B,L
+                CALL    PUT8
+                LD      (IX+0),':'
+                INC     IX
+                LD      B,(HL)
+                CALL    PUT8
+                LD      (IX+0),CR
+                INC     IX
+                LD      (IX+0),LF
+                INC     IX
+                LD      (IX+0),0
+                INC     IX
+                EX      DE,HL
+                POP     BC
+                
+                PUSH    HL
+                LD      HL,auxbuf
+                CALL    PRINT
+                POP     HL
+CMD_COMPARE_2:
+                INC     HL
+                INC     DE
+                DEC     BC
+                LD      A,B
+                OR      C
+                JR      NZ,CMD_COMPARE_1
+                RET
 
 ;------------------------------------------------------------------------------
 ; Display command
@@ -513,6 +629,205 @@ CMD_DISP_5:
 
                 RET
 
+;------------------------------------------------------------------------------
+; Enter command
+; E [addr]
+; if addr is ommited, start at next addr
+CMD_ENTER:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,(orig)
+                CALL    GET16
+                JP      C,PARAM_ERR
+                LD      (orig),DE
+CMD_ENTER_1:
+                LD      A,8
+                LD      (len),A
+                LD      IX,auxbuf
+                LD      HL,(orig)
+                LD      B,H
+                CALL    PUT8
+                LD      B,L
+                CALL    PUT8
+                LD      (IX+0),':'
+                LD      (IX+1),0
+                LD      HL,auxbuf
+                CALL    PRINT
+CMD_ENTER_2:
+                LD      HL,(orig)
+                LD      IX,auxbuf
+                LD      (IX+0),' '
+                INC     IX
+                LD      B,(HL)
+                CALL    PUT8
+                LD      (IX+0),'-'
+                LD      (IX+1),0
+                LD      HL,auxbuf
+                CALL    PRINT
+                LD      B,(HL)
+                CALL    GET8
+                LD      HL,(orig)
+                LD      (HL),B
+                INC     HL              ; note: does not affect Z
+                LD      (orig),HL
+                JR      Z,CMD_ENTER_3
+                LD      A,(len)
+                DEC     A
+                LD      (len),A
+                JR      NZ,CMD_ENTER_2
+                LD      HL,NEWLINE
+                CALL    PRINT
+                JR      CMD_ENTER_1
+CMD_ENTER_3:
+                LD      HL,NEWLINE
+                CALL    PRINT
+                RET
+                
+;------------------------------------------------------------------------------
+; Fill command
+; F addr1 len val
+CMD_FILL:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (len),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                ; fill
+                LD      HL,(orig)
+                LD      BC,(len)
+CMD_FILL_1:
+                LD      (HL),E
+                INC     HL
+                DEC     BC
+                LD      A,B
+                OR      C
+                JR      NZ,CMD_FILL_1
+                RET
+
+;------------------------------------------------------------------------------
+; Goto command
+; G addr
+CMD_GOTO:
+                ; get parameter
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                ; go there
+                EX      DE,HL
+                JP      (HL)
+
+;------------------------------------------------------------------------------
+; Input command
+; I port
+CMD_INPUT:
+                ; get parameter
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      C,E
+                IN      B,(C)
+                LD      IX,auxbuf
+                CALL    PUT8
+                LD      (IX+0),CR
+                LD      (IX+1),LF
+                LD      (IX+2),0
+                LD      HL,auxbuf
+                CALL    PRINT
+                RET
+                
+;------------------------------------------------------------------------------
+; Move command
+; M orig len dest
+CMD_MOVE:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (len),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                
+                ; decide direction
+                LD      BC,(len)
+                LD      HL,(orig)
+                LD      A,H
+                CP      D
+                JR      C,CMD_MOVE_1
+                JR      NZ,CMD_MOVE_3
+                LD      A,L
+                CP      E
+                RET     Z
+                JR      NC,CMD_MOVE_3
+CMD_MOVE_1:
+                ADD     HL,BC
+                EX      DE,HL
+                ADD     HL,BC
+                EX      DE,HL
+CMD_MOVE_2:                
+                DEC     HL
+                DEC     DE
+                LD      A,(HL)
+                LD      (DE),A
+                DEC     BC
+                LD      A,B
+                OR      C
+                JR      NZ,CMD_MOVE_2
+                RET
+CMD_MOVE_3:
+                LD      A,(HL)
+                LD      (DE),A
+                INC     HL
+                INC     DE
+                DEC     BC
+                LD      A,B
+                OR      C
+                JR      NZ,CMD_MOVE_3
+                RET
+
+;------------------------------------------------------------------------------
+; Output command
+; O port value
+CMD_OUTPUT:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (orig),DE
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      A,(orig)
+                LD      C,A
+                OUT     (C),E
+                RET
+                
 ;------------------------------------------------------------------------------
 ; Write command
 ; W addr len
@@ -678,7 +993,7 @@ XM_END_TX_3:
 ; Receive a char
 ; timout = 65536 x (10+7+7+6+4+4+12) / 7372.8 = aprox 0,355 sec
 ; Returns:  A received char (if any)
-;           Z = 1 if timeout
+;           Z = 1 and C = 0 if timeout
 ; Affects:  Flags, A, BC
 XM_GETCH:
             LD      BC,0
@@ -714,7 +1029,9 @@ PARAM_ERR:
 HELLO:      
             DEFB    CR,LF
             DEFB    "Z80 Monitor by Daniel Quadros",CR,LF
-            DEFB    "Serial routines by Grant Searle",CR,LF
+            DEFB    "Serial routines by Grant Searle"
+NEWLINE:
+            DEFB    CR,LF
             DEFB    0
             
 ERR_CMD:
