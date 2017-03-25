@@ -14,6 +14,7 @@ DEFC    LF      =   0AH
 DEFC    SOH     =   01H
 DEFC    EOT     =   04H
 DEFC    ACK     =   06H
+DEFC    CAN     =   18H
 DEFC    NAK     =   15H
 
 DEFC    PROMPT  =   '>'
@@ -60,7 +61,7 @@ dest:           DEFS   2
 len:            DEFS   2
 
 ; Xmodem
-DEFC    MAX_RETRIES  =  5
+DEFC    MAX_RETRIES  =  10
 blockno:         DEFS   1
 
 ifdef ROM
@@ -374,9 +375,6 @@ PUT4:
 ; Initialization
 ifdef ROM
 INIT:
-                ; init stack
-                LD        HL,0               ; Stack at end of Ram
-                LD        SP,HL              ; Set up the stack
                 ; init serial buffer
                 LD        HL,serBuf
                 LD        (serInPtr),HL
@@ -387,9 +385,12 @@ INIT:
                 LD        A,RTS_LOW
                 OUT       (ACIA_CONTROL),A   ; Initialise ACIA
                 IM        1                  ; Interrupt Mode 1
-                EI
 endif
 INIT_HELLO:
+                ; init stack
+                LD        HL,0               ; Stack at end of Ram
+                LD        SP,HL              ; Set up the stack
+                EI
                 ; say hello to the world
                 LD        HL,HELLO        ; Sign-on message
                 CALL      PRINT           ; Output string
@@ -449,7 +450,7 @@ CMD_TABLE:
                 DEFB   'I'
                 DEFW   CMD_INPUT
                 DEFB   'L'
-                DEFW   CMD_NOT_IMP
+                DEFW   CMD_LOAD
                 DEFB   'M'
                 DEFW   CMD_MOVE
                 DEFB   'O'
@@ -751,6 +752,183 @@ CMD_INPUT:
                 RET
                 
 ;------------------------------------------------------------------------------
+; Load command
+; L addr
+CMD_LOAD:
+                ; get parameters
+                LD      HL,cmdBuf+1
+                LD      DE,0
+                CALL    GET16
+                JP      C,PARAM_ERR
+                JP      Z,PARAM_ERR
+                LD      (orig),DE
+                
+                ; Will use our own receive routine, no interrupts
+                LD      A,RTS_LOW_DI
+                OUT     (ACIA_CONTROL),A
+                
+                ; Xmodem reception
+                LD      A,1         ; send NAK
+                LD      (blockno),A
+                LD      C,100       ; wait more time at start
+CMD_LOAD_1:
+                CALL    XM_RX_BLOCK
+                CP      1
+                JR      NC,CMD_LOAD_3
+                ; ok, save block on memory
+                LD      HL,(orig)
+                LD      DE,auxbuf+2
+                LD      C,128
+CMD_LOAD_2:
+                LD      A,(DE)
+                LD      (HL),A
+                INC     DE
+                INC     HL
+                DEC     C
+                JR      NZ,CMD_LOAD_2
+                LD      (orig),HL
+                LD      A,(blockno)
+                INC     A
+                LD      (blockno),A
+                LD      C,MAX_RETRIES
+                XOR     A           ; send ACK
+                JR      CMD_LOAD_1
+CMD_LOAD_3:
+                JR      NZ,CMD_LOAD_4
+                ; received EOT
+                LD      HL,XM_LOAD_OK
+                JR      CMD_LOAD_END
+CMD_LOAD_4:
+                ; error
+                LD      HL,XM_LOAD_ERR
+CMD_LOAD_END:
+                CALL    PRINT
+                ; Turn on ACIA Rx interrupt
+                LD        A,RTS_LOW
+                OUT       (ACIA_CONTROL),A
+                RET
+
+; Receive a block (with retries)
+; Input  A = 0 send ACK (for last packet received)
+;            1 send NAK (start of protocol)
+;        C = retries
+; Return A = 0 if block received OK
+;            1 if received EOT
+;            2 if error
+; Affects Flags, A, B, C, H, L
+XM_RX_BLOCK:
+                OR      A
+                LD      B,ACK
+                JR      Z,XM_RX_BLOCK_1
+                LD      B,NAK
+XM_RX_BLOCK_1:
+                IN      A,(ACIA_STATUS)
+                AND     2
+                JR      Z,XM_RX_BLOCK_1     ; wait transmitter free
+                LD      A,B
+                OUT     (ACIA_TX),A
+XM_RX_BLOCK_2:
+                CALL    XM_RX_PKT
+                CP      1
+                RET     C                   ; good block, ack will be sent latter
+                CP      2
+                JR      NC,XM_RX_BLOCK_4
+                ; EOT
+XM_RX_BLOCK_3:
+                IN      A,(ACIA_STATUS)
+                AND     2
+                JR      Z,XM_RX_BLOCK_3
+                LD      A,ACK
+                OUT     (ACIA_TX),A         ; send ACK
+                LD      A,1
+                RET
+XM_RX_BLOCK_4:
+                JR      NZ,XM_RX_BLOCK_5
+                ; Duplicate
+                LD      B,ACK
+                DEC     C
+                JR      NZ,XM_RX_BLOCK_1    ; send ACK and try again
+                JR      XM_RX_BLOCK_6
+XM_RX_BLOCK_5:
+                CP      4
+                JR      Z,XM_RX_BLOCK_6     ; CAN, abort now
+                ; Error
+                CALL    XM_CLEAR_RX
+                LD      B,NAK
+                DEC     C
+                JR      NZ,XM_RX_BLOCK_1    ; send NAK and try again
+XM_RX_BLOCK_6:
+                ; Too many retries
+                LD      A,2
+                RET
+
+; Receive a block (without retries)
+; Return A = 0 if block received OK
+;            1 if received EOT
+;            2 if duplicate
+;            3 if error
+;            4 if CAN
+; Affects Flags, A, D, E, H, L
+XM_RX_PKT:
+                PUSH    BC
+                CALL    XM_GETCH
+                JR      Z,XM_RX_PKT_ERR     ; Timeout
+                CP      SOH
+                JR      Z,XM_RX_PKT_0
+                LD      B,1
+                CP      EOT
+                JR      Z,XM_RX_PKT_END     ; EOT
+                LD      B,4
+                CP      CAN
+                JR      Z,XM_RX_PKT_END     ; Host abort
+                JR      XM_RX_PKT_ERR       ; Unexpected char
+XM_RX_PKT_0:
+                LD      D,1                 ; D = checksum
+                LD      E,130               ; blockno, ~blockno, data
+                LD      HL,auxbuf
+XM_RX_PKT_1:
+                CALL    XM_GETCH
+                JR      Z,XM_RX_PKT_ERR     ; Timeout
+                LD      (HL),A              ; put in buffer
+                ADD     D
+                LD      D,A                 ; update checksum
+                INC     HL
+                DEC     E
+                JR      NZ,XM_RX_PKT_1      ; repeat for whole packet
+                
+                CALL    XM_GETCH            ; read checksum
+                JR      Z,XM_RX_PKT_ERR     ; Timeout
+                SUB     D
+                LD      D,A                 ; D = 0 if checksum ok
+                
+                LD      A,(auxbuf)
+                LD      E,A
+                LD      A,(auxbuf+1)
+                CPL
+                CP      E
+                JR      NZ,XM_RX_PKT_ERR    ; Bad block number
+                
+                LD      A,D
+                OR      A
+                JR      NZ,XM_RX_PKT_ERR    ; Checksum error
+                
+                LD      A,(blockno)
+                CP      E
+                LD      B,0
+                JR      Z,XM_RX_PKT_END     ; All right
+                DEC     A
+                CP      E
+                LD      B,2
+                JR      Z,XM_RX_PKT_END     ; Duplicate
+                ; unexpected packet
+XM_RX_PKT_ERR:
+                LD      B,3                 ; Error
+XM_RX_PKT_END:
+                LD      A,B
+                POP     BC
+                RET
+
+;------------------------------------------------------------------------------
 ; Move command
 ; M orig len dest
 CMD_MOVE:
@@ -990,6 +1168,16 @@ XM_END_TX_3:
                 OR      1       ; clear Z
                 RET
 
+; Receive until timeout
+; Affects:  Flags, A
+XM_CLEAR_RX:
+                PUSH    BC
+XM_CLEAR_RX_1:
+                CALL    XM_GETCH
+                JR      NZ,XM_CLEAR_RX_1
+                POP     BC
+                RET
+
 ; Receive a char
 ; timout = 65536 x (10+7+7+6+4+4+12) / 7372.8 = aprox 0,355 sec
 ; Returns:  A received char (if any)
@@ -1028,7 +1216,7 @@ PARAM_ERR:
 ; Messages
 HELLO:      
             DEFB    CR,LF
-            DEFB    "Z80 Monitor by Daniel Quadros",CR,LF
+            DEFB    "Z80 Monitor v0.7 by Daniel Quadros",CR,LF
             DEFB    "Serial routines by Grant Searle"
 NEWLINE:
             DEFB    CR,LF
@@ -1052,4 +1240,12 @@ XM_SEND_OK:
 
 XM_SEND_ERR:
             DEFB    "Error in transmission",CR,LF
+            DEFB    0
+
+XM_LOAD_OK:
+            DEFB    "Reception successful",CR,LF
+            DEFB    0
+
+XM_LOAD_ERR:
+            DEFB    "Error in reception",CR,LF
             DEFB    0
